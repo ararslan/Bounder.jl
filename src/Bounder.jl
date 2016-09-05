@@ -2,7 +2,8 @@ __precompile__()
 
 module Bounder
 
-using Git
+using Base.LibGit2
+# using PkgDev
 
 export setbounds
 
@@ -23,91 +24,95 @@ function setbounds(pkg::String,
                    dep::String;
                    lower::Union{VersionNumber,Void}=nothing,
                    upper::Union{VersionNumber,Void}=nothing,
-                   versions::Union{String,Vector{VersionNumber}}="all")
+                   versions::Union{String,Vector{VersionNumber}}="all",
+                   push::Bool=true)
 
     Pkg.installed(pkg) !== nothing || throw(ArgumentError("Package $pkg is not installed."))
 
-    const metadir::String = Pkg.dir("METADATA")
+    meta = LibGit2.GitRepo(Pkg.dir("METADATA"))
 
-    Git.dirty(dir=metadir) && error("METADATA is dirty. Clean it up before running `setbounds`.")
+    LibGit2.isdirty(meta) && error("METADATA is dirty. Clean it up before running `setbounds`.")
 
-    state = Git.snapshot(dir=metadir)
+    state = LibGit2.snapshot(meta)
+    current_branch = LibGit2.branch(meta)
 
     try
-        cd(metadir) do
-            # Ensure that the new branch is always based on the default
-            current_branch = Git.branch()
-            current_branch == "metadata-v2" || run(`git checkout metadata-v2`)
+        # Ensure that the new branch is always based on the default
+        current_branch == "metadata-v2" || LibGit2.branch!(meta, "metadata-v2")
 
-            run(`git checkout -b setbounds-$pkg`)
+        LibGit2.branch!(meta, "setbounds-$pkg")
+        bref = LibGit2.GitReference(meta, "refs/heads/setbounds-$pkg")
 
-            vers = if versions == "all"
-                readdir(joinpath(pwd(), pkg, "versions"))
-            else
-                map(string, versions)
-            end
+        alldirs = readdir(joinpath(LibGit2.path(meta), pkg, "versions"))
+        vers = versions == "all" ? alldirs : alldirs ∩ map(string, versions)
+        isempty(vers) && error("No versions to modify")
 
-            const r::Regex = r"^\s*((@\w+)\s+)(\S+)(\s+([\d.]+)(\s+([\d.]+))?)?"
-            # 2=platform 3=dependency 5=lower 7=upper
+        const r::Regex = r"^\s*((@\w+)\s+)(\S+)(\s+([\d.]+)(\s+([\d.]+))?)?"
+        # 2=platform 3=dependency 5=lower 7=upper
 
-            for v in vers
-                open(joinpath(pwd(), pkg, "versions", v, "requires"), "w") do f
-                    for line in eachline(f)
-                        m = match(r, line)
+        for v in vers
+            open(joinpath(LibGit2.path(meta), pkg, "versions", v, "requires"), "w") do f
+                for line in eachline(f)
+                    m = match(r, line)
 
-                        if m !== nothing && m.captures[3] == dep
-                            platform, _lower, _upper = m.captures[[2,5,7]]
+                    if m !== nothing && m.captures[3] == dep
+                        platform, _lower, _upper = m.captures[[2,5,7]]
 
-                            # Behold the secret mutability of strings! Muahaha
-                            Base.chomp!(line)
+                        # Behold the secret mutability of strings! Muahaha
+                        Base.chomp!(line)
 
-                            _lower = _tostr(_coalesce(lower, _lower))
-                            _upper = _tostr(_coalesce(upper, _upper))
+                        _lower = _tostr(_coalesce(lower, _lower))
+                        _upper = _tostr(_coalesce(upper, _upper))
 
-                            newline = strip(join([_tostr(platform), dep, _lower, _upper], " "))
+                        newline = strip(join([_tostr(platform), dep, _lower, _upper], " "))
 
-                            # Preserve comments at the end of the line, if any
-                            comment_ind = findfirst(line, '#')
-                            comment_ind > 0 && (newline *= " " * line[commend_ind:end])
+                        # Preserve comments at the end of the line, if any
+                        comment_ind = findfirst(line, '#')
+                        comment_ind > 0 && (newline *= " " * line[commend_ind:end])
 
-                            # The line has been `chomp`ed, so we need the ln
-                            println(f, newline)
-                        else
-                            print(f, line)
-                        end
+                        # The line has been `chomp`ed, so we need the ln
+                        println(f, newline)
+                    else
+                        print(f, line)
                     end
                 end
             end
-
-            if !Git.dirty()
-                info("No changes have been made")
-                run(`git checkout $current_branch`)
-                run(`git branch -D setbounds-$pkg`)
-                Git.restore(state)
-                return nothing
-            end
-
-            # Should be safe since we've ensured it wasn't dirty before our changes
-            info("Committing changes...")
-            run(`git add -u`)
-            run(`git commit -m "Set bounds on $dep for $pkg"`)
-
-            info("Pushing to your remote...")
-            remote = filter(s -> s != "origin", split(readchomp(`git remote`), "\n"))[1]
-            run(`git push $remote setbounds-$pkg`)
-
-            # It exists on the remote, unnecessary locally
-            info("Putting everything back how we found it...")
-            run(`git checkout $current_branch`)
-            run(`git branch -D setbounds-$pkg`)
         end
 
-        Git.restore(state, dir=metadir)
-        info("Done! Now go make a pull request on JuliaLang/METADATA.jl.")
+        if !LibGit2.isdirty(meta)
+            info("No changes have been made")
+            LibGit2.branch!(meta, current_branch)
+            LibGit2.delete_branch(bref)
+            LibGit2.restore(state, meta)
+            return
+        end
 
-        return nothing
+        # Should be safe since we've ensured it wasn't dirty before our changes
+        info("Committing changes...")
+        # TODO: Add using LibGit2, dunno how
+        run(`git add -u`)
+        LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
+
+        if push
+            info("Pushing to your remote...")
+            remote = filter(s -> s != "origin", LibGit2.remotes(meta))[1]
+            # TODO: Push using LibGit2.push(...)
+            run(`git push $remote setbounds-$pkg`)
+        end
+
+        info("Putting everything back how we found it...")
+        LibGit2.branch!(meta, current_branch)
+        push && LibGit2.delete_branch(bref)
+        LibGit2.restore(state, meta)
+
+        info("Done! Now go make a pull request on JuliaLang/METADATA.jl.")
+        # TODO: Create a PR using PkgDev.pull_request()
+
+        return
     catch
-        Git.restore(state, dir=metadir)
+        LibGit2.branch!(meta, current_branch)
+        LibGit2.delete_branch(LibGit2.GitReference(meta, "refs/heads/setbounds-$pkg"))
+        LibGit2.restore(state, meta)
         rethrow()
     end
 end
