@@ -51,15 +51,15 @@ function setbounds(pkg::String,
         # 2=platform 3=dependency 5=lower 7=upper
 
         for v in vers
+            req = joinpath(LibGit2.path(meta), pkg, "versions", v, "requires")
+            alldeps = map(chomp, readlines(req))
+
             open(joinpath(LibGit2.path(meta), pkg, "versions", v, "requires"), "w") do f
-                for line in eachline(f)
+                for line in alldeps
                     m = match(r, line)
 
                     if m !== nothing && m.captures[3] == dep
                         platform, _lower, _upper = m.captures[[2,5,7]]
-
-                        # Behold the secret mutability of strings! Muahaha
-                        Base.chomp!(line)
 
                         _lower = _tostr(_coalesce(lower, _lower))
                         _upper = _tostr(_coalesce(upper, _upper))
@@ -73,11 +73,16 @@ function setbounds(pkg::String,
                         # The line has been `chomp`ed, so we need the ln
                         println(f, newline)
                     else
-                        print(f, line)
+                        println(f, line)
                     end
                 end
             end
         end
+
+        # Should be safe since we've ensured it wasn't dirty before our changes
+        info("Committing changes...")
+        # TODO: Add using LibGit2, dunno how
+        run(`git add -u`)
 
         if !LibGit2.isdirty(meta)
             info("No changes have been made")
@@ -87,10 +92,6 @@ function setbounds(pkg::String,
             return
         end
 
-        # Should be safe since we've ensured it wasn't dirty before our changes
-        info("Committing changes...")
-        # TODO: Add using LibGit2, dunno how
-        run(`git add -u`)
         LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
 
         if push
