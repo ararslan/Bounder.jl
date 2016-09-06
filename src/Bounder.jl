@@ -59,12 +59,12 @@ function setbounds(pkg::String,
                     m = match(r, line)
 
                     if m !== nothing && m.captures[3] == dep
-                        platform, _lower, _upper = m.captures[[2,5,7]]
+                        platform, existing_lower, existing_upper = m.captures[[2,5,7]]
 
-                        _lower = _tostr(_coalesce(lower, _lower))
-                        _upper = _tostr(_coalesce(upper, _upper))
+                        new_lower = _tostr(_coalesce(lower, existing_lower))
+                        new_upper = _tostr(_coalesce(upper, existing_upper))
 
-                        newline = strip(join([_tostr(platform), dep, _lower, _upper], " "))
+                        newline = strip(join([_tostr(platform), dep, new_lower, new_upper], " "))
 
                         # Preserve comments at the end of the line, if any
                         comment_ind = findfirst(line, '#')
@@ -82,24 +82,28 @@ function setbounds(pkg::String,
         # Should be safe since we've ensured it wasn't dirty before our changes
         info("Committing changes...")
         # TODO: Add using LibGit2, dunno how
-        run(`git add -u`)
-
-        if !LibGit2.isdirty(meta)
-            info("No changes have been made")
-            LibGit2.branch!(meta, current_branch)
-            LibGit2.delete_branch(bref)
-            LibGit2.restore(state, meta)
-            return
+        cd(LibGit2.path(meta)) do
+            run(`git add -u`)
         end
+
+        # if !LibGit2.isdirty(meta)
+        #     info("No changes have been made")
+        #     LibGit2.branch!(meta, current_branch)
+        #     LibGit2.delete_branch(bref)
+        #     LibGit2.restore(state, meta)
+        #     return
+        # end
 
         LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
 
-        if push
-            info("Pushing to your remote...")
-            remote = filter(s -> s != "origin", LibGit2.remotes(meta))[1]
-            # TODO: Push using LibGit2.push(...)
-            run(`git push $remote setbounds-$pkg`)
-        end
+        # if push
+        #     info("Pushing to your remote...")
+        #     remote = filter(s -> s != "origin", LibGit2.remotes(meta))[1]
+        #     # TODO: Push using LibGit2.push(...)
+        #     cd(LibGit2.path(meta)) do
+        #         run(`git push $remote setbounds-$pkg`)
+        #     end
+        # end
 
         info("Putting everything back how we found it...")
         LibGit2.branch!(meta, current_branch)
