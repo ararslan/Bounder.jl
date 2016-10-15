@@ -18,6 +18,8 @@ function setbounds(pkg::String,
                    upper::Union{VersionNumber,Void}=nothing,
                    versions::Union{String,Vector{VersionNumber}}="all")
 
+    lower === upper === nothing && throw(ArgumentError("a lower or upper bound must be specified"))
+
     const META_DIR::String = Pkg.dir("METADATA")
 
     isdir(joinpath(META_DIR, pkg)) || throw(ArgumentError("package $pkg not found in METADATA"))
@@ -77,7 +79,8 @@ function setbounds(pkg::String,
         end
 
         info("Committing changes...")
-        LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
+        oid = LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
+        LibGit2.iszero(oid) && error("unable to commit changes")
 
         info("Done! Submit your changes upstream using `PkgDev.publish()`.")
 
