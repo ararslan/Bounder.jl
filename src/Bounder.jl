@@ -78,9 +78,10 @@ function setbounds(pkg::String,
             end
         end
 
+        LibGit2.isdirty(meta) || error("changes not staged for commit")
+
         info("Committing changes...")
-        oid = LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
-        LibGit2.iszero(oid) && error("unable to commit changes")
+        LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
 
         info("Done! Submit your changes upstream using `PkgDev.publish()`.")
 
