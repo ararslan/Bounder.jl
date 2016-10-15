@@ -3,16 +3,8 @@ __precompile__()
 module Bounder
 
 using Base.LibGit2
-# using PkgDev
 
 export setbounds
-
-# Avoids string(nothing) == "nothing"
-_tostr(x::Any) = ifelse(x === nothing, "", string(x))
-
-# First non-void value
-_coalesce(a, b) = ifelse(a === nothing, ifelse(b === nothing, nothing, b), a)
-
 
 """
     setbounds(pkg, dep; lower=nothing, upper=nothing, versions="all")
@@ -24,101 +16,72 @@ function setbounds(pkg::String,
                    dep::String;
                    lower::Union{VersionNumber,Void}=nothing,
                    upper::Union{VersionNumber,Void}=nothing,
-                   versions::Union{String,Vector{VersionNumber}}="all",
-                   push::Bool=true)
+                   versions::Union{String,Vector{VersionNumber}}="all")
 
-    Pkg.installed(pkg) !== nothing || throw(ArgumentError("Package $pkg is not installed."))
+    const META_DIR::String = Pkg.dir("METADATA")
 
-    meta = LibGit2.GitRepo(Pkg.dir("METADATA"))
+    isdir(joinpath(META_DIR, pkg)) || throw(ArgumentError("package $pkg not found in METADATA"))
 
-    LibGit2.isdirty(meta) && error("METADATA is dirty. Clean it up before running `setbounds`.")
+    LibGit2.transact(LibGit2.GitRepo(META_DIR)) do meta
 
-    state = LibGit2.snapshot(meta)
-    current_branch = LibGit2.branch(meta)
+        LibGit2.isdirty(meta) && error("METADATA is dirty. Clean it up before running `setbounds`.")
 
-    try
-        # Ensure that the new branch is always based on the default
+        current_branch = LibGit2.branch(meta)
+
+        # Do work on the default branch so that PRs can be submitted with PkgDev.publish()
         current_branch == "metadata-v2" || LibGit2.branch!(meta, "metadata-v2")
 
-        LibGit2.branch!(meta, "setbounds-$pkg")
-        bref = LibGit2.GitReference(meta, "refs/heads/setbounds-$pkg")
-
         alldirs = readdir(joinpath(LibGit2.path(meta), pkg, "versions"))
-        vers = versions == "all" ? alldirs : alldirs ∩ map(string, versions)
+        vers = versions == "all" ? alldirs : intersect(alldirs, map(string, versions))
         isempty(vers) && error("No versions to modify")
 
-        const r::Regex = r"^\s*((@\w+)\s+)(\S+)(\s+([\d.]+)(\s+([\d.]+))?)?"
-        # 2=platform 3=dependency 5=lower 7=upper
-
         for v in vers
-            req = joinpath(LibGit2.path(meta), pkg, "versions", v, "requires")
-            alldeps = map(chomp, readlines(req))
+            reqfile = joinpath(LibGit2.path(meta), pkg, "versions", v, "requires")
+            olddeps = Pkg.Reqs.read(reqfile)
 
-            open(joinpath(LibGit2.path(meta), pkg, "versions", v, "requires"), "w") do f
-                for line in alldeps
-                    m = match(r, line)
+            newdeps = Vector{Pkg.Reqs.Line}()
 
-                    if m !== nothing && m.captures[3] == dep
-                        platform, existing_lower, existing_upper = m.captures[[2,5,7]]
-
-                        new_lower = _tostr(_coalesce(lower, existing_lower))
-                        new_upper = _tostr(_coalesce(upper, existing_upper))
-
-                        newline = strip(join([_tostr(platform), dep, new_lower, new_upper], " "))
-
-                        # Preserve comments at the end of the line, if any
-                        comment_ind = findfirst(line, '#')
-                        comment_ind > 0 && (newline *= " " * line[commend_ind:end])
-
-                        # The line has been `chomp`ed, so we need the ln
-                        println(f, newline)
-                    else
-                        println(f, line)
+            for line in olddeps
+                if isa(line, Pkg.Reqs.Requirement) && line.package == dep
+                    # Can this actually happen in a requires file??
+                    if length(line.versions.intervals) != 1
+                        error("possibly malformed version specification for $dep in $pkg $v requires")
                     end
+
+                    existing_lower = line.versions.intervals[1].lower
+                    existing_upper = line.versions.intervals[1].upper
+
+                    new_lower = lower === nothing ? existing_lower : lower
+                    new_upper = upper === nothing ? existing_upper : upper
+
+                    new_bounds = Pkg.Types.VersionInterval(new_lower, new_upper)
+                    vset = Pkg.Types.VersionSet(Pkg.Types.VersionInterval[new_bounds])
+
+                    push!(newdeps, Pkg.Reqs.Requirement(dep, vset, line.system))
+                else
+                    push!(newdeps, line)
                 end
+            end
+
+            if newdeps != olddeps
+                Pkg.Reqs.write(reqfile, newdeps)
+                LibGit2.add!(meta, reqfile)
             end
         end
 
-        # Should be safe since we've ensured it wasn't dirty before our changes
-        info("Committing changes...")
-        # TODO: Add using LibGit2, dunno how
-        cd(LibGit2.path(meta)) do
-            run(`git add -u`)
+        LibGit2.with(LibGit2.GitStatus, meta) do status
+            if length(status) == 0
+                info("No changes were made to METADATA")
+                return
+            end
         end
 
-        # if !LibGit2.isdirty(meta)
-        #     info("No changes have been made")
-        #     LibGit2.branch!(meta, current_branch)
-        #     LibGit2.delete_branch(bref)
-        #     LibGit2.restore(state, meta)
-        #     return
-        # end
-
+        info("Committing changes...")
         LibGit2.commit(meta, "Set version bounds on $dep for $pkg")
 
-        # if push
-        #     info("Pushing to your remote...")
-        #     remote = filter(s -> s != "origin", LibGit2.remotes(meta))[1]
-        #     # TODO: Push using LibGit2.push(...)
-        #     cd(LibGit2.path(meta)) do
-        #         run(`git push $remote setbounds-$pkg`)
-        #     end
-        # end
-
-        info("Putting everything back how we found it...")
-        LibGit2.branch!(meta, current_branch)
-        push && LibGit2.delete_branch(bref)
-        LibGit2.restore(state, meta)
-
-        info("Done! Now go make a pull request on JuliaLang/METADATA.jl.")
-        # TODO: Create a PR using PkgDev.pull_request()
+        info("Done! Submit your changes upstream using `PkgDev.publish()`.")
 
         return
-    catch
-        LibGit2.branch!(meta, current_branch)
-        LibGit2.delete_branch(LibGit2.GitReference(meta, "refs/heads/setbounds-$pkg"))
-        LibGit2.restore(state, meta)
-        rethrow()
     end
 end
 
